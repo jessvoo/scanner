@@ -305,7 +305,7 @@ public static class ProbeHelpers
                 var (key, result) = await completed.ConfigureAwait(false);
                 if (result != null)
                 {
-                    await linkedCts.CancelAsync().ConfigureAwait(false);
+                    linkedCts.Cancel();
                     return (key, result, true);
                 }
             }
@@ -761,14 +761,14 @@ public sealed class ScanEngine : IDisposable, IAsyncDisposable
         // Cancel producer CTS
         if (_producerCts != null)
         {
-            try { await _producerCts.CancelAsync().ConfigureAwait(false); }
+            try { _producerCts.Cancel(); }
             catch { /* ignore */ }
         }
 
         // Cancel run CTS
         if (_runCts != null)
         {
-            try { await _runCts.CancelAsync().ConfigureAwait(false); }
+            try { _runCts.Cancel(); }
             catch { /* ignore */ }
         }
 
@@ -1387,7 +1387,8 @@ public sealed class ScanEngine : IDisposable, IAsyncDisposable
             if (!string.IsNullOrEmpty(uri.UserInfo))
             {
                 var parts = uri.UserInfo.Split(':');
-                var maskedUser = parts.Length > 0 ? parts[0].Substring(0, Math.Min(2, parts[0].Length)) + "***" : "***";
+                var firstPart = parts.Length > 0 && !string.IsNullOrEmpty(parts[0]) ? parts[0] : "";
+                var maskedUser = !string.IsNullOrEmpty(firstPart) ? firstPart.Substring(0, Math.Min(2, firstPart.Length)) + "***" : "***";
                 var maskedPass = parts.Length > 1 ? "***" : "";
                 var userInfo = string.IsNullOrEmpty(maskedPass) ? maskedUser : $"{maskedUser}:{maskedPass}";
                 return $"{uri.Scheme}://{userInfo}@{uri.Host}:{uri.Port}";
@@ -1503,7 +1504,8 @@ public sealed class ScanEngine : IDisposable, IAsyncDisposable
                         query[key] = value;
                 }
                 // Update password to be just the password value
-                query["password"] = password.Split('&')[0];
+                var passwordParts = password.Split('&');
+                query["password"] = passwordParts.Length > 0 && !string.IsNullOrEmpty(passwordParts[0]) ? passwordParts[0] : password;
             }
 
             var sb = new StringBuilder();
@@ -1650,8 +1652,16 @@ public sealed class ScanEngine : IDisposable, IAsyncDisposable
 
     public void Dispose()
     {
-        StopAsync().GetAwaiter().GetResult();
+        // Set stopping flag and perform synchronous cleanup
+        _stopping = true;
+        _producerCts?.Cancel();
+        _runCts?.Cancel();
+        _macChannel?.Writer.TryComplete();
+        _recentSet.Clear();
+        Interlocked.Exchange(ref _pendingMacs, 0);
 
+        _producerCts?.Dispose();
+        _runCts?.Dispose();
         _bgDbWriter?.Dispose();
         _bgFileWriter?.Dispose();
         _metricsService?.Dispose();
@@ -1687,13 +1697,14 @@ public sealed class ScanEngine : IDisposable, IAsyncDisposable
 
 public static class AsyncEnumerableExtensions
 {
+#pragma warning disable CS1998 // Async method lacks 'await' operators
     public static async IAsyncEnumerable<T> ToAsyncEnumerable<T>(this IEnumerable<T> source)
+#pragma warning restore CS1998
     {
         foreach (var item in source)
         {
             yield return item;
         }
-        await Task.CompletedTask;
     }
 }
 
